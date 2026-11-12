@@ -1,0 +1,36 @@
+# Weekly update pull requests; minor and patch updates of one ecosystem come as one pull request,
+# major updates one by one (they may need code changes). Each pull request runs the full checks.
+# The images of the chart (helm/values.yaml) are bumped by hand; the drift test fails when an image
+# in local/compose.yaml (the part Dependabot sees) no longer matches the chart.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: docker-compose
+    directory: /local
+    schedule:
+      interval: weekly
+    groups:
+      docker-minor-and-patch:
+        update-types:
+          - minor
+          - patch

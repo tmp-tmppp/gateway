@@ -1,0 +1,68 @@
+{{- /*
+Traefik Middlewares. First the building blocks (response headers, rate limits, token checks, the deny-all), then one
+chain per route class. A route rule attaches exactly one chain as an ExtensionRef filter. The first entry of a chain
+runs first. That is strip-identity on every chain: it deletes the request headers that name a caller (a Traefik headers
+Middleware deletes a request header whose value is empty), so a client cannot hand a service an identity it did not
+get from its token. The response headers come next: then the 401, 403 and 429 answers of the later entries carry them.
+*/ -}}
+{{- $fullname := include "gateway.fullname" . -}}
+{{- $labels := include "gateway.labels" . -}}
+{{- $auth := include "gateway.authAddress" . -}}
+{{- $rl := .Values.rateLimit -}}
+{{- $identity := dict
+  "X-Auth-Request-User" ""
+  "X-Auth-Request-Email" ""
+  "X-Auth-Request-Groups" ""
+  "X-Auth-Request-Preferred-Username" ""
+  "X-Auth-Request-Access-Token" ""
+  "X-Forwarded-User" ""
+  "X-Forwarded-Email" ""
+  "X-Forwarded-Groups" ""
+  "X-Forwarded-Preferred-Username" ""
+  "X-Forwarded-Access-Token" ""
+-}}
+{{- $blocks := dict
+  "strip-identity" (dict "headers" (dict "customRequestHeaders" $identity))
+  "rl-api" (dict "rateLimit" (dict "average" $rl.api.average "period" $rl.api.period "burst" $rl.api.burst))
+  "rl-trading" (dict "rateLimit" (dict "average" $rl.trading.average "period" $rl.trading.period "burst" $rl.trading.burst))
+  "rl-public" (dict "rateLimit" (dict "average" $rl.public.average "period" $rl.public.period "burst" $rl.public.burst))
+  "headers" (dict "headers" (dict "customResponseHeaders" (dict "Cache-Control" "private, no-store")))
+  "auth-user" (dict "forwardAuth" (dict "address" $auth "trustForwardHeader" false "authRequestHeaders" (list "Authorization")))
+  "auth-platform-admin" (dict "forwardAuth" (dict "address" (printf "%s?allowed_groups=%s" $auth .Values.auth.roles.platformAdmin) "trustForwardHeader" false "authRequestHeaders" (list "Authorization")))
+  "deny-all" (dict "ipAllowList" (dict "sourceRange" (list "192.0.2.1/32")))
+-}}
+{{- $chains := dict
+  "public" (list "strip-identity" "headers" "rl-public")
+  "static" (list "strip-identity" "rl-public")
+  "web" (list "strip-identity" "rl-public")
+  "user" (list "strip-identity" "headers" "rl-api" "auth-user")
+  "trading" (list "strip-identity" "headers" "rl-trading" "auth-user")
+  "platform-admin" (list "strip-identity" "headers" "rl-api" "auth-platform-admin")
+  "deny" (list "strip-identity" "headers" "deny-all")
+-}}
+{{- range $name, $spec := $blocks }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ $fullname }}-{{ $name }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  {{- toYaml $spec | nindent 2 }}
+{{- end }}
+{{- range $name, $members := $chains }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ $fullname }}-{{ $name }}
+  labels:
+    {{- $labels | nindent 4 }}
+spec:
+  chain:
+    middlewares:
+      {{- range $members }}
+      - name: {{ $fullname }}-{{ . }}
+      {{- end }}
+{{- end }}

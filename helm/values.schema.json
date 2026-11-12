@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Values of the gateway chart",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hostname", "gatewayClassName", "listeners", "tls", "services", "backends", "routes", "rateLimit", "auth", "networkPolicy", "smokeTest"],
+  "properties": {
+    "hostname": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"
+    },
+    "gatewayClassName": { "type": "string", "minLength": 1 },
+    "listeners": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["httpPort", "httpsPort"],
+      "properties": {
+        "httpPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "httpsPort": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "secretName", "issuer"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "secretName": { "type": "string", "minLength": 1 },
+        "issuer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "enum": ["acme", "selfSigned", "existing"] },
+            "acme": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "server": { "type": "string", "pattern": "^https://" },
+                "email": { "type": "string" },
+                "accountKeySecretName": { "type": "string", "minLength": 1 }
+              }
+            },
+            "ref": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": { "type": "string" },
+                "kind": { "type": "string", "enum": ["Issuer", "ClusterIssuer"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "services": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace"],
+      "properties": { "namespace": { "type": "string" } }
+    },
+    "backends": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/backend" },
+      "required": ["identity"]
+    },
+    "routes": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/route" }
+    },
+    "rateLimit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["api", "trading", "public"],
+      "properties": {
+        "api": { "$ref": "#/definitions/limit" },
+        "trading": { "$ref": "#/definitions/limit" },
+        "public": { "$ref": "#/definitions/limit" }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "description": "oauth2-proxy. Its client secret and cookie secret live in the Secret named by existingSecret, never here.",
+      "additionalProperties": false,
+      "required": ["image", "replicaCount", "port", "realm", "audience", "rolesClaim", "roles", "existingSecret", "resources", "probes"],
+      "properties": {
+        "image": { "type": "string", "pattern": "@sha256:[a-f0-9]{64}$" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+        "replicaCount": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "realm": { "type": "string", "minLength": 1 },
+        "audience": { "type": "string", "minLength": 1 },
+        "issuer": { "type": "string", "pattern": "^(https?://.+)?$" },
+        "jwksUrl": { "type": "string", "pattern": "^(https?://.+)?$" },
+        "rolesClaim": { "type": "string", "minLength": 1 },
+        "roles": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["platformAdmin"],
+          "properties": {
+            "platformAdmin": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }
+          }
+        },
+        "existingSecret": { "type": "string", "minLength": 1 },
+        "extraEnv": {
+          "type": "object",
+          "description": "Non-secret settings only.",
+          "propertyNames": {
+            "pattern": "^OAUTH2_PROXY_[A-Z0-9_]+$",
+            "not": { "pattern": "(SECRET|PASSWORD|TOKEN|PRIVATE|CREDENTIAL)" }
+          },
+          "additionalProperties": { "type": "string" }
+        },
+        "podAnnotations": { "type": "object", "additionalProperties": { "type": "string" } },
+        "resources": { "type": "object" },
+        "probes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "periodSeconds", "failureThreshold"],
+          "properties": {
+            "path": { "type": "string", "pattern": "^/" },
+            "periodSeconds": { "type": "integer", "minimum": 1 },
+            "failureThreshold": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "podAnnotations": { "type": "object", "additionalProperties": { "type": "string" } },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "traefikNamespaceLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+        "traefikPodLabels": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "smokeTest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "traefikAddress"],
+      "properties": {
+        "image": { "type": "string", "minLength": 1 },
+        "traefikAddress": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "definitions": {
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "port"],
+      "properties": {
+        "service": { "type": "string", "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "limit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["average", "period", "burst"],
+      "properties": {
+        "average": { "type": "integer", "minimum": 1 },
+        "period": { "type": "string", "pattern": "^[0-9]+(ms|s|m)$" },
+        "burst": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend", "rules"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "backend": { "type": "string", "minLength": 1 },
+        "rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["class", "matches"],
+            "properties": {
+              "class": {
+                "type": "string",
+                "enum": ["public", "static", "web", "user", "trading", "platform-admin", "deny"]
+              },
+              "matches": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["path"],
+                  "properties": {
+                    "path": { "type": "string", "pattern": "^/" },
+                    "type": { "type": "string", "enum": ["Exact", "PathPrefix"] },
+                    "method": { "type": "string", "enum": ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"] }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

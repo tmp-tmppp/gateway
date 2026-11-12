@@ -1,0 +1,124 @@
+# Local proof of the gateway: the chart's Traefik and oauth2-proxy (same pinned versions and settings) in front of one
+# echo container per backend Service, with a stub identity provider that serves the signing keys. No cluster, no
+# Keycloak. Started and removed by the tests ("npm run test:e2e", tests/support/stack.ts); "npm run stack:down"
+# removes leftovers. The container names are recorded here and in tests/support/stack.ts (CONTAINERS).
+#
+# Not covered here (they need a cluster): the Gateway API resources themselves, TLS with cert-manager, the HTTP to
+# HTTPS redirect, the NetworkPolicy and the Kubernetes probes. The routes are the same table as the chart's: the
+# drift test (tests/drift) fails when they differ.
+name: gateway-e2e
+
+x-echo: &echo
+  # Echo backend: answers every request with its name and the request it received (method, path, headers).
+  image: traefik/whoami:v1.12.0@sha256:c4717a8d1f0134a7444e24f881160e033991f23027c6c5a9a3f8fd22e70d1d44
+  user: "65532:65532"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  traefik:
+    image: traefik:v3.7.17@sha256:f4bb143d1135a579b630ed491e17ec50f6f7c9c6a30585ff3d385471d2a86f5a
+    container_name: gw-e2e-traefik
+    command: ["--configFile=/etc/traefik/traefik.yaml"]
+    # A random free port on the loopback address; the tests read it with "docker compose port".
+    ports: ["127.0.0.1::8000"]
+    volumes:
+      - ./traefik/traefik.yaml:/etc/traefik/traefik.yaml:ro
+      - ./traefik/dynamic.yaml:/etc/traefik/dynamic.yaml:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      - gateway-oauth2-proxy
+      - markets
+      - trading
+      - market-data
+      - tenants
+      - payments
+      - audit
+      - payment-provider
+      - identity
+      - web
+
+  # The ForwardAuth target. The settings are the ones of the chart's ConfigMap (helm/templates/_helpers.tpl,
+  # "gateway.authEnv"); only the address of the signing keys differs (the stub below). The drift test compares them.
+  gateway-oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.6@sha256:c3415e8660af553f5e18f5d90db050614c02493c0ac6260ac59442f6d9b12048
+    container_name: gw-e2e-oauth2-proxy
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      OAUTH2_PROXY_PROVIDER: "oidc"
+      OAUTH2_PROXY_CLIENT_ID: "chance"
+      OAUTH2_PROXY_OIDC_ISSUER_URL: "https://chance.example/realms/chance"
+      OAUTH2_PROXY_SKIP_OIDC_DISCOVERY: "true"
+      OAUTH2_PROXY_OIDC_JWKS_URL: "http://idp:8080/realms/chance/protocol/openid-connect/certs"
+      OAUTH2_PROXY_LOGIN_URL: "https://chance.example/realms/chance/protocol/openid-connect/auth"
+      OAUTH2_PROXY_REDEEM_URL: "http://idp:8080/realms/chance/protocol/openid-connect/token"
+      OAUTH2_PROXY_SKIP_JWT_BEARER_TOKENS: "true"
+      OAUTH2_PROXY_OIDC_GROUPS_CLAIM: "realm_access.roles"
+      OAUTH2_PROXY_OIDC_EMAIL_CLAIM: "sub"
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_SKIP_CLAIMS_FROM_PROFILE_URL: "true"
+      OAUTH2_PROXY_HTTP_ADDRESS: "0.0.0.0:4180"
+      OAUTH2_PROXY_COOKIE_SECURE: "true"
+      OAUTH2_PROXY_SILENCE_PING_LOGGING: "true"
+      # Throwaway values made by the test run for this run only; the real ones are in the Secret gateway-env.
+      OAUTH2_PROXY_CLIENT_SECRET: "${OAUTH2_PROXY_CLIENT_SECRET:?set by tests/support/stack.ts}"
+      OAUTH2_PROXY_COOKIE_SECRET: "${OAUTH2_PROXY_COOKIE_SECRET:?set by tests/support/stack.ts}"
+    depends_on:
+      - idp
+
+  # Stub identity provider: static files, the signing keys of the token key made by the test run, and a discovery
+  # document, at the paths Keycloak uses. (The chart's oauth2-proxy skips discovery and reads only the keys.)
+  idp:
+    image: docker.io/library/busybox:1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
+    container_name: gw-e2e-idp
+    command: ["httpd", "-f", "-p", "8080", "-h", "/www"]
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - "${GATEWAY_E2E_IDP_DIR:?set by tests/support/stack.ts}:/www:ro"
+
+  # One echo backend per Service name of the chart (helm/values.yaml, "backends"), on its port 8080.
+  markets:
+    <<: *echo
+    container_name: gw-e2e-markets
+    command: ["--port", "8080", "--name", "markets"]
+  trading:
+    <<: *echo
+    container_name: gw-e2e-trading
+    command: ["--port", "8080", "--name", "trading"]
+  market-data:
+    <<: *echo
+    container_name: gw-e2e-market-data
+    command: ["--port", "8080", "--name", "market-data"]
+  tenants:
+    <<: *echo
+    container_name: gw-e2e-tenants
+    command: ["--port", "8080", "--name", "tenants"]
+  payments:
+    <<: *echo
+    container_name: gw-e2e-payments
+    command: ["--port", "8080", "--name", "payments"]
+  audit:
+    <<: *echo
+    container_name: gw-e2e-audit
+    command: ["--port", "8080", "--name", "audit"]
+  payment-provider:
+    <<: *echo
+    container_name: gw-e2e-payment-provider
+    command: ["--port", "8080", "--name", "payment-provider"]
+  identity:
+    <<: *echo
+    container_name: gw-e2e-identity
+    command: ["--port", "8080", "--name", "identity"]
+  web:
+    <<: *echo
+    container_name: gw-e2e-web
+    command: ["--port", "8080", "--name", "web"]

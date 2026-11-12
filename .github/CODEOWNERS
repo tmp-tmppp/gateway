@@ -1,0 +1,6 @@
+# Pipeline and chart definitions change what runs at the edge of prod: the other team member reviews them.
+/.github/ @radov02 @DominikkMaximus
+/helm/ @radov02 @DominikkMaximus
+# The proof of the routes and roles: a change to its tests or to the local stack is reviewed too.
+/tests/ @radov02 @DominikkMaximus
+/local/ @radov02 @DominikkMaximus

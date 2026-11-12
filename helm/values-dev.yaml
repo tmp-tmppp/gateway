@@ -1,0 +1,7 @@
+# Dev overrides (a local cluster): a self-signed certificate for a name that resolves to the local machine.
+# Everything else as in values.yaml.
+hostname: chance.localhost
+
+tls:
+  issuer:
+    type: selfSigned

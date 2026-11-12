@@ -1,0 +1,9 @@
+apiVersion: v2
+name: gateway
+description: API gateway of Chance. A Gateway, the HTTPRoutes and the Traefik Middlewares for the public routes, oauth2-proxy as the token check, and the cert-manager objects for TLS.
+type: application
+# Chart version: bump on every change to the chart. The images are pinned in values.yaml (tag and digest).
+version: 0.2.0
+appVersion: "0.1.0"
+# The Gateway API and Traefik 3.7 need a current cluster; the official Traefik chart asks for the same.
+kubeVersion: ">=1.30.0-0"

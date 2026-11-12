@@ -1,0 +1,45 @@
+# "helm test" after every deploy. Three checks, each of which fails the Pod:
+#   1. oauth2-proxy answers its ping through its Service;
+#   2. it refuses a request without a token with 401;
+#   3. Traefik answers on its HTTP port: a redirect (301) when TLS is on, 403 for /v1/internal when it is off.
+# A failure makes the pipeline roll the release back (ADR-048).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "gateway.fullname" . }}-smoke-test
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+    app.kubernetes.io/component: smoke-test
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: smoke-test
+      image: {{ .Values.smokeTest.image }}
+      command:
+        - sh
+        - -c
+        - |
+          set -eu
+          status() { wget -S -q -T 5 -O /dev/null "$@" 2>&1 | awk '/^ *HTTP\//{ if (code == "") code = $2 } END{print code}'; }
+          AUTH="http://{{ include "gateway.authname" . }}:{{ .Values.auth.port }}"
+          wget -q -T 5 -O /dev/null "$AUTH{{ .Values.auth.probes.path }}"
+          [ "$(status "$AUTH/oauth2/auth")" = 401 ]
+          [ "$(status --header 'Host: {{ .Values.hostname }}' 'http://{{ .Values.smokeTest.traefikAddress }}/v1/internal')" = {{ ternary "301" "403" .Values.tls.enabled }} ]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
+      securityContext:
+        {{- include "gateway.containerSecurityContext" . | nindent 8 }}

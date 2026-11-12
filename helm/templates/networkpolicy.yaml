@@ -1,0 +1,29 @@
+{{- if .Values.networkPolicy.enabled }}
+# Only Traefik may reach oauth2-proxy (the ForwardAuth calls); the smoke test Pod of this release is admitted as well.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "gateway.authname" . }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gateway.authSelectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.traefikNamespaceLabels | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.traefikPodLabels | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+              app.kubernetes.io/component: smoke-test
+      ports:
+        - port: http
+          protocol: TCP
+{{- end }}

@@ -1,0 +1,69 @@
+{{- if .Values.tls.enabled }}
+{{- $fullname := include "gateway.fullname" . }}
+{{- $type := .Values.tls.issuer.type }}
+{{- if eq $type "acme" }}
+# Let's Encrypt with the HTTP-01 challenge. cert-manager adds a temporary HTTPRoute for the challenge to the http
+# listener of this Gateway (an exact path, so it wins over the redirect to HTTPS).
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $fullname }}-acme
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+spec:
+  acme:
+    server: {{ .Values.tls.issuer.acme.server | quote }}
+    {{- with .Values.tls.issuer.acme.email }}
+    email: {{ . | quote }}
+    {{- end }}
+    privateKeySecretRef:
+      name: {{ .Values.tls.issuer.acme.accountKeySecretName }}
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - group: gateway.networking.k8s.io
+                kind: Gateway
+                name: {{ $fullname }}
+                sectionName: http
+---
+{{- else if eq $type "selfSigned" }}
+# A self-signed certificate for a local cluster.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $fullname }}-selfsigned
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+{{- end }}
+# The certificate of the HTTPS listener, kept in the Secret named by tls.secretName.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.tls.secretName }}
+  dnsNames:
+    - {{ .Values.hostname | quote }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    group: cert-manager.io
+    {{- if eq $type "acme" }}
+    kind: Issuer
+    name: {{ $fullname }}-acme
+    {{- else if eq $type "selfSigned" }}
+    kind: Issuer
+    name: {{ $fullname }}-selfsigned
+    {{- else }}
+    kind: {{ .Values.tls.issuer.ref.kind }}
+    name: {{ required "tls.issuer.ref.name is required when tls.issuer.type is existing" .Values.tls.issuer.ref.name }}
+    {{- end }}
+{{- end }}

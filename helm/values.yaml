@@ -1,0 +1,231 @@
+# Defaults of the gateway chart. values-dev.yaml and values-prod.yaml override them; secrets never go into values
+# (the client secret and the cookie secret of oauth2-proxy come from the Secret named by auth.existingSecret).
+#
+# Deploy order (the organization's pipeline, .github/workflows/ci-cd.yml): README.md, "Deploy". The chart expects the release name "gateway" in the namespace "gateway"
+# (traefik-values.yaml and the NetworkPolicies of the services name that namespace).
+
+# Public host name of the gateway: listener, routes and certificate. The real host is not known yet (plan INF-01):
+# set it at deploy with --set-string hostname=...
+hostname: chance.example
+
+# GatewayClass that the official Traefik chart creates (traefik-values.yaml).
+gatewayClassName: traefik
+
+# Container ports of Traefik's entry points "web" and "websecure": the Gateway listeners name these, not 80 and 443
+# (the Traefik Service maps 80 and 443 to them).
+listeners:
+  httpPort: 8000
+  httpsPort: 8443
+
+# TLS: HTTPS listener with a certificate from cert-manager, and HTTP redirected to HTTPS.
+tls:
+  enabled: true
+  secretName: gateway-tls
+  issuer:
+    # acme: Let's Encrypt with the HTTP-01 challenge solved through this Gateway (Issuer and Certificate are rendered)
+    # selfSigned: a self-signed certificate, for a local cluster (Issuer and Certificate)
+    # existing: only the Certificate, issued by tls.issuer.ref (an Issuer or ClusterIssuer that already exists)
+    type: acme
+    acme:
+      # Staging by default (no rate limits, certificate not trusted by browsers); values-prod.yaml sets production.
+      server: https://acme-staging-v02.api.letsencrypt.org/directory
+      # Contact address of the ACME account; empty means none (cert-manager allows that). Set at deploy from the
+      # organization secret ACME_EMAIL (--set-file tls.issuer.acme.email=<file>; the pipeline stops without it).
+      email: ""
+      accountKeySecretName: gateway-acme-account
+    ref:
+      name: ""
+      kind: ClusterIssuer
+
+# Where the backend Services run. The Gateway and the routes live in the release namespace, so a Service in another
+# namespace needs a ReferenceGrant, which this chart renders into that namespace. Empty = the release namespace.
+services:
+  namespace: prod
+
+# Backend Services of the routes (service name and port). Names are the Helm release names of the service charts.
+backends:
+  markets: { service: markets, port: 8080 }
+  trading: { service: trading, port: 8080 }
+  marketData: { service: market-data, port: 8080 }
+  tenants: { service: tenants, port: 8080 }
+  payments: { service: payments, port: 8080 }
+  audit: { service: audit, port: 8080 }
+  paymentProvider: { service: payment-provider, port: 8080 }
+  identity: { service: identity, port: 8080 }
+  # Placeholder: the web UI is not built yet; until a Service of this name exists, "/" answers 500.
+  web: { service: web, port: 8080 }
+
+# The route table (plan section 6). One HTTPRoute per entry. A rule has a class (the middleware chain it gets) and
+# matches (path prefix by default; "type: Exact" for an exact path; "method" for one HTTP method). The more specific
+# match wins: an exact path beats a prefix, a longer prefix beats a shorter one, a method beats none.
+#
+# Classes (README.md, "Middlewares"):
+#   public          no token; no-store headers, rate limit
+#   static          no token; rate limit only (static files of the login pages)
+#   web             no token; rate limit only (the web UI)
+#   user            any valid token
+#   trading         any valid token, the stricter rate limit (requirement 23)
+#   platform-admin  a valid token with the realm role platform-admin
+#   deny            always 403
+# There is no tenant-role class (token contract v2, ADR-059): the tenant role is a group of the one organization in the
+# token ("organization.<alias>.groups"), a claim path that contains the alias, so oauth2-proxy cannot read it. The
+# gateway checks that a token is valid (and platform-admin, a realm role); every service checks the tenant role itself.
+# "backend: self" sends the request to oauth2-proxy, which is never reached by a "deny" rule.
+routes:
+  markets:
+    backend: markets
+    rules:
+      # The public lookup of a share link: no token needed (a bearer token is passed on when there is one, so markets
+      # can tell a member from a stranger). The link's token is in the body, the rate limit of "public" applies, and
+      # nothing else below /v1/shared-markets is routed.
+      - class: public
+        matches:
+          - { path: /v1/shared-markets/lookup, type: Exact, method: POST }
+      - class: user
+        matches:
+          - { path: /v1/markets }
+  trading:
+    backend: trading
+    rules:
+      - class: trading
+        matches:
+          - { path: /v1/trading }
+  market-data:
+    backend: marketData
+    rules:
+      - class: user
+        matches:
+          - { path: /v1/market-data }
+  tenants:
+    backend: tenants
+    rules:
+      # Create and list tenants. The trailing slash is listed too: "/v1/tenants/" would otherwise match the prefix
+      # rule below, which any valid token passes (found by tests/e2e/routing.test.ts).
+      - class: platform-admin
+        matches:
+          - { path: /v1/tenants, type: Exact }
+          - { path: /v1/tenants/, type: Exact }
+      # Invites, members and roles of one tenant (/v1/tenants/{id}/..., tenants checks tenant-admin itself), the
+      # caller's own memberships (/v1/me, /v1/me/organizations), /v1/invites/{code}/accept and /v1/share-joins: a valid
+      # token is enough, the token needs no organization (a user joins one through them).
+      - class: user
+        matches:
+          - { path: /v1/tenants }
+          - { path: /v1/me }
+          - { path: /v1/invites }
+          - { path: /v1/share-joins }
+  payments:
+    backend: payments
+    rules:
+      # The provider's webhook: no token; payments checks the provider's signature.
+      - class: public
+        matches:
+          - { path: /v1/webhooks/payment-provider, type: Exact, method: POST }
+      - class: user
+        matches:
+          - { path: /v1/deposits }
+          - { path: /v1/withdrawals }
+          - { path: /v1/webhooks }
+  audit:
+    backend: audit
+    rules:
+      # Audit checks tenant-admin itself (token contract v2).
+      - class: user
+        matches:
+          - { path: /v1/audit }
+  payment-provider:
+    backend: paymentProvider
+    rules:
+      # The payment pages of the mock provider; its /v1 API is called by payments inside the cluster only.
+      - class: public
+        matches:
+          - { path: /checkout }
+  identity:
+    backend: identity
+    rules:
+      # What a browser needs for the login and registration pages; the realm name is part of the path.
+      - class: public
+        matches:
+          - { path: /realms/chance }
+      - class: static
+        matches:
+          - { path: /resources }
+  blocked:
+    backend: self
+    rules:
+      # /v1/internal is never routed; the Keycloak admin console and the master realm are never public.
+      - class: deny
+        matches:
+          - { path: /v1/internal }
+          - { path: /admin }
+          - { path: /realms/master }
+  web:
+    backend: web
+    rules:
+      - class: web
+        matches:
+          - { path: / }
+
+# Rate limits per client address (Traefik RateLimit: average requests per period, and a burst), one counter per
+# Traefik replica. Trading is stricter (requirement 23).
+rateLimit:
+  api: { average: 50, period: 1s, burst: 100 }
+  trading: { average: 10, period: 1s, burst: 20 }
+  public: { average: 20, period: 1s, burst: 60 }
+
+# oauth2-proxy: the target of the ForwardAuth middlewares. It validates the bearer JWT (signature, issuer, audience,
+# expiry) against the identity provider's keys and compares the realm roles with the roles of the route class.
+auth:
+  image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.6@sha256:c3415e8660af553f5e18f5d90db050614c02493c0ac6260ac59442f6d9b12048
+  pullPolicy: IfNotPresent
+  # One replica by default; two only for a high-availability demo (ADR-039). The schema allows at most two.
+  replicaCount: 1
+  port: 4180
+  realm: chance
+  # Expected "aud" of the access token (the audience of the realm).
+  audience: chance
+  # The token's "iss": the identity provider's public address as the browser sees it. Empty = https://<hostname>/realms/<realm>
+  # (http when tls.enabled is false). Tokens with another issuer are refused.
+  issuer: ""
+  # Where oauth2-proxy fetches the signing keys, inside the cluster. Empty = the identity Service in services.namespace.
+  jwksUrl: ""
+  # Claim that holds the roles (a dotted path into the token) and the realm role of the platform-admin class. The
+  # tenant roles are organization groups, not realm roles, and are not checked here (token contract v2).
+  rolesClaim: realm_access.roles
+  roles:
+    platformAdmin: platform-admin
+  # Secret with OAUTH2_PROXY_CLIENT_SECRET and OAUTH2_PROXY_COOKIE_SECRET. The pipeline creates it from the
+  # organization secret GATEWAY_ENV (input app-env of the shared workflow); the chart never holds the values.
+  existingSecret: gateway-env
+  # More non-secret OAUTH2_PROXY_* settings (all values are strings); they override the chart's own settings.
+  extraEnv: {}
+  podAnnotations: {}
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+  probes:
+    path: /ping
+    periodSeconds: 10
+    failureThreshold: 3
+
+# Pod annotations set by the organization's pipeline: checksum/app-env, a hash of the Secret gateway-env, so the
+# oauth2-proxy Pods (the only Pods that read it) restart when the secrets change. Rendered next to auth.podAnnotations;
+# leave empty here.
+podAnnotations: {}
+
+# Admits only Traefik to oauth2-proxy (and the smoke test Pod). Needs a network policy engine in the cluster.
+networkPolicy:
+  enabled: false
+  traefikNamespaceLabels:
+    kubernetes.io/metadata.name: gateway
+  traefikPodLabels:
+    app.kubernetes.io/name: traefik
+
+# Run by "helm test" after every deploy: oauth2-proxy answers, refuses a request without a token, and Traefik
+# answers on its HTTP port (a redirect with TLS, 403 for /v1/internal without).
+smokeTest:
+  image: docker.io/library/busybox:1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
+  traefikAddress: traefik.gateway.svc:80

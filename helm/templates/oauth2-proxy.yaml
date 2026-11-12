@@ -1,0 +1,100 @@
+# oauth2-proxy as the ForwardAuth target: ConfigMap with the settings, Deployment, Service.
+# It runs without upstream and without a login flow: only GET /oauth2/auth is used, which answers 202 for a valid
+# bearer token, 401 for a missing or invalid one and 403 when the token lacks the role of allowed_groups.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gateway.authname" . }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+data:
+  {{- include "gateway.authEnv" . | nindent 2 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "gateway.authname" . }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+    app.kubernetes.io/name: oauth2-proxy
+spec:
+  replicas: {{ .Values.auth.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "gateway.authSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "gateway.labels" . | nindent 8 }}
+        app.kubernetes.io/name: oauth2-proxy
+      annotations:
+        checksum/config: {{ include "gateway.authEnv" . | sha256sum | trunc 16 | quote }}
+        {{- /* The pipeline's podAnnotations (checksum/app-env) and auth.podAnnotations; a key in both is written once
+               (podAnnotations wins), and checksum/config stays the chart's own, so no key is ever repeated. */}}
+        {{- with omit (merge (dict) .Values.podAnnotations .Values.auth.podAnnotations) "checksum/config" }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: oauth2-proxy
+          image: {{ .Values.auth.image }}
+          imagePullPolicy: {{ .Values.auth.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "gateway.authname" . }}
+            - secretRef:
+                name: {{ .Values.auth.existingSecret }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.auth.port }}
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: {{ .Values.auth.probes.path }}
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.auth.probes.path }}
+              port: http
+            periodSeconds: {{ .Values.auth.probes.periodSeconds }}
+            failureThreshold: {{ .Values.auth.probes.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.auth.probes.path }}
+              port: http
+            periodSeconds: {{ .Values.auth.probes.periodSeconds }}
+            failureThreshold: {{ .Values.auth.probes.failureThreshold }}
+          resources:
+            {{- toYaml .Values.auth.resources | nindent 12 }}
+          securityContext:
+            {{- include "gateway.containerSecurityContext" . | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "gateway.authname" . }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "gateway.authSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.auth.port }}
+      targetPort: http
+      protocol: TCP

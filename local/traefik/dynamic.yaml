@@ -1,0 +1,240 @@
+# Routes, role classes and middlewares of the local proof: the same table as helm/values.yaml ("routes"), written as
+# Traefik file-provider configuration. The rules and priorities are what Traefik's Gateway API provider computes for
+# the chart's HTTPRoutes (v3.7.17, pkg/provider/kubernetes/gateway/httproute.go, buildMatchRule):
+#   Exact path          Path("p")                                  priority 100000
+#   path prefix         (Path("p") || PathPrefix("p/"))            priority 10000 + 100 x length of p
+#   a method            && Method("M")                             priority +1000
+#   catch-all prefix /  PathPrefix("/")                            priority 1
+#   every rule          + length of the host name + (number of rules of the route - index of the rule)
+# tests/drift/chart-and-local.test.ts renders the chart with Helm and fails when this file differs from it.
+http:
+  routers:
+    # markets: the lookup of a share link is public (the link's token is in the body, a bearer token is passed on when
+    # there is one); the rest needs a valid token, and markets checks the tenant role itself (token contract v2).
+    markets-0-lookup:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && Path("/v1/shared-markets/lookup") && Method("POST")'
+      priority: 101016
+      middlewares: [gateway-public]
+      service: markets
+    markets-1-user:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/v1/markets") || PathPrefix("/v1/markets/"))'
+      priority: 11115
+      middlewares: [gateway-user]
+      service: markets
+
+    trading-0-trading:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/v1/trading") || PathPrefix("/v1/trading/"))'
+      priority: 11115
+      middlewares: [gateway-trading]
+      service: trading
+
+    market-data-0-user:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/v1/market-data") || PathPrefix("/v1/market-data/"))'
+      priority: 11515
+      middlewares: [gateway-user]
+      service: market-data
+
+    # tenants: create and list tenants (the exact path) need platform-admin, the sub-paths, the own memberships, the
+    # invites and the share joins any valid token (tenants checks tenant-admin itself).
+    tenants-0-platform-admin:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && Path("/v1/tenants")'
+      priority: 100016
+      middlewares: [gateway-platform-admin]
+      service: tenants
+    tenants-0-platform-admin-slash:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && Path("/v1/tenants/")'
+      priority: 100016
+      middlewares: [gateway-platform-admin]
+      service: tenants
+    tenants-1-user-tenants:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/v1/tenants") || PathPrefix("/v1/tenants/"))'
+      priority: 11115
+      middlewares: [gateway-user]
+      service: tenants
+    tenants-1-user-me:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/v1/me") || PathPrefix("/v1/me/"))'
+      priority: 10615
+      middlewares: [gateway-user]
+      service: tenants
+    tenants-1-user-invites:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/v1/invites") || PathPrefix("/v1/invites/"))'
+      priority: 11115
+      middlewares: [gateway-user]
+      service: tenants
+    tenants-1-user-share-joins:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/v1/share-joins") || PathPrefix("/v1/share-joins/"))'
+      priority: 11515
+      middlewares: [gateway-user]
+      service: tenants
+
+    # payments: the provider's webhook is public (payments checks the provider's signature), the rest needs a token.
+    payments-0-webhook:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && Path("/v1/webhooks/payment-provider") && Method("POST")'
+      priority: 101016
+      middlewares: [gateway-public]
+      service: payments
+    payments-1-user-deposits:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/v1/deposits") || PathPrefix("/v1/deposits/"))'
+      priority: 11215
+      middlewares: [gateway-user]
+      service: payments
+    payments-1-user-withdrawals:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/v1/withdrawals") || PathPrefix("/v1/withdrawals/"))'
+      priority: 11515
+      middlewares: [gateway-user]
+      service: payments
+    payments-1-user-webhooks:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/v1/webhooks") || PathPrefix("/v1/webhooks/"))'
+      priority: 11215
+      middlewares: [gateway-user]
+      service: payments
+
+    # audit: a valid token; audit checks tenant-admin itself (token contract v2).
+    audit-0-user:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/v1/audit") || PathPrefix("/v1/audit/"))'
+      priority: 10915
+      middlewares: [gateway-user]
+      service: audit
+
+    payment-provider-0-public:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/checkout") || PathPrefix("/checkout/"))'
+      priority: 10915
+      middlewares: [gateway-public]
+      service: payment-provider
+
+    # identity: only what a browser needs for the login and registration pages.
+    identity-0-public:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/realms/chance") || PathPrefix("/realms/chance/"))'
+      priority: 11416
+      middlewares: [gateway-public]
+      service: identity
+    identity-1-static:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/resources") || PathPrefix("/resources/"))'
+      priority: 11015
+      middlewares: [gateway-static]
+      service: identity
+
+    # Never routed: /v1/internal, the Keycloak admin console and the master realm. The deny chain answers 403; the
+    # service is oauth2-proxy (as in the chart) and is never reached.
+    blocked-0-internal:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/v1/internal") || PathPrefix("/v1/internal/"))'
+      priority: 11215
+      middlewares: [gateway-deny]
+      service: gateway-oauth2-proxy
+    blocked-0-admin:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/admin") || PathPrefix("/admin/"))'
+      priority: 10615
+      middlewares: [gateway-deny]
+      service: gateway-oauth2-proxy
+    blocked-0-master-realm:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && (Path("/realms/master") || PathPrefix("/realms/master/"))'
+      priority: 11415
+      middlewares: [gateway-deny]
+      service: gateway-oauth2-proxy
+
+    # The web UI is the catch-all.
+    web-0-web:
+      entryPoints: [web]
+      rule: 'Host("chance.example") && PathPrefix("/")'
+      priority: 16
+      middlewares: [gateway-web]
+      service: web
+
+  middlewares:
+    # Building blocks (helm/templates/middlewares.yaml).
+    # Request headers that name a caller are deleted (an empty value deletes the header) before anything else runs.
+    gateway-strip-identity:
+      headers:
+        customRequestHeaders:
+          X-Auth-Request-User: ""
+          X-Auth-Request-Email: ""
+          X-Auth-Request-Groups: ""
+          X-Auth-Request-Preferred-Username: ""
+          X-Auth-Request-Access-Token: ""
+          X-Forwarded-User: ""
+          X-Forwarded-Email: ""
+          X-Forwarded-Groups: ""
+          X-Forwarded-Preferred-Username: ""
+          X-Forwarded-Access-Token: ""
+    gateway-headers:
+      headers:
+        customResponseHeaders:
+          Cache-Control: private, no-store
+    gateway-rl-api:
+      rateLimit: { average: 50, period: 1s, burst: 100 }
+    gateway-rl-trading:
+      rateLimit: { average: 10, period: 1s, burst: 20 }
+    gateway-rl-public:
+      rateLimit: { average: 20, period: 1s, burst: 60 }
+    gateway-auth-user:
+      forwardAuth:
+        address: http://gateway-oauth2-proxy:4180/oauth2/auth
+        trustForwardHeader: false
+        authRequestHeaders: [Authorization]
+    gateway-auth-platform-admin:
+      forwardAuth:
+        address: http://gateway-oauth2-proxy:4180/oauth2/auth?allowed_groups=platform-admin
+        trustForwardHeader: false
+        authRequestHeaders: [Authorization]
+    # 192.0.2.1 is a documentation address that is never a client: every request is refused with 403.
+    gateway-deny-all:
+      ipAllowList:
+        sourceRange: [192.0.2.1/32]
+
+    # One chain per route class; strip-identity comes first on every chain, then the response headers, so that 401, 403
+    # and 429 carry them too.
+    gateway-public:
+      chain:
+        middlewares: [gateway-strip-identity, gateway-headers, gateway-rl-public]
+    gateway-static:
+      chain:
+        middlewares: [gateway-strip-identity, gateway-rl-public]
+    gateway-web:
+      chain:
+        middlewares: [gateway-strip-identity, gateway-rl-public]
+    gateway-user:
+      chain:
+        middlewares: [gateway-strip-identity, gateway-headers, gateway-rl-api, gateway-auth-user]
+    gateway-trading:
+      chain:
+        middlewares: [gateway-strip-identity, gateway-headers, gateway-rl-trading, gateway-auth-user]
+    gateway-platform-admin:
+      chain:
+        middlewares: [gateway-strip-identity, gateway-headers, gateway-rl-api, gateway-auth-platform-admin]
+    gateway-deny:
+      chain:
+        middlewares: [gateway-strip-identity, gateway-headers, gateway-deny-all]
+
+  # The backends: one echo container per Service name of the chart, on the chart's port 8080.
+  services:
+    markets: { loadBalancer: { servers: [{ url: "http://markets:8080" }] } }
+    trading: { loadBalancer: { servers: [{ url: "http://trading:8080" }] } }
+    market-data: { loadBalancer: { servers: [{ url: "http://market-data:8080" }] } }
+    tenants: { loadBalancer: { servers: [{ url: "http://tenants:8080" }] } }
+    payments: { loadBalancer: { servers: [{ url: "http://payments:8080" }] } }
+    audit: { loadBalancer: { servers: [{ url: "http://audit:8080" }] } }
+    payment-provider: { loadBalancer: { servers: [{ url: "http://payment-provider:8080" }] } }
+    identity: { loadBalancer: { servers: [{ url: "http://identity:8080" }] } }
+    web: { loadBalancer: { servers: [{ url: "http://web:8080" }] } }
+    gateway-oauth2-proxy: { loadBalancer: { servers: [{ url: "http://gateway-oauth2-proxy:4180" }] } }

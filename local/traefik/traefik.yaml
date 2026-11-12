@@ -1,0 +1,40 @@
+# Static configuration of the local proof. It is the chart's Traefik (helm/traefik-values.yaml) as far as a machine
+# without Kubernetes can be: the routes come from the file provider (dynamic.yaml) because the Gateway API provider
+# needs a Kubernetes API server. HTTP only: TLS, the redirect and cert-manager need a cluster (README.md, "Local proof").
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+entryPoints:
+  # The same container port as the chart's "web" entry point.
+  web:
+    address: ":8000"
+    # The same request hardening as ports.web.http in helm/traefik-values.yaml (the drift test compares them).
+    http:
+      encodedCharacters:
+        allowEncodedSlash: false
+        allowEncodedBackSlash: false
+        allowEncodedNullCharacter: false
+        allowEncodedSemicolon: false
+        allowEncodedPercent: false
+        allowEncodedQuestionMark: false
+        allowEncodedHash: false
+      aliasHeadersStrategy: delete
+
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yaml
+    watch: false
+
+# JSON access log without headers and query parameters, as in the chart (no Authorization header in the log).
+accessLog:
+  format: json
+  fields:
+    headers:
+      defaultMode: drop
+    queryParameters:
+      defaultMode: drop
+
+log:
+  format: json
+  level: INFO

@@ -1,0 +1,162 @@
+# Checks of the gateway that the organization's shared workflow (RSO-ekipa10/.github, service-ci-cd.yml) does not
+# run. The shared workflow tests and deploys the gateway (ci-cd.yml, job "pipeline"); it validates the manifests with
+# -ignore-missing-schemas and has no Node.js steps for a repository without an image, so this file keeps: lint and
+# type check of the tests, strict chart lint, the manifests of the gateway chart and of the Traefik chart against the
+# schemas of the Gateway API, Traefik and cert-manager kinds, the drift tests and the tests against the local stack.
+# Nothing here deploys.
+#
+# Called by ci-cd.yml from a job with the id "chart-rules", so the checks are named "chart-rules / test" and
+# "chart-rules / e2e". The job ids test and e2e are part of those names: rename them only together with the branch
+# ruleset.
+#
+# Every action is pinned to a full commit SHA (the same SHAs as the organization's workflow);
+# Dependabot proposes the action updates. The tool versions in "env" below are bumped by hand.
+name: chart-ci
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # Explicit bash also turns on pipefail, so a failing command on the left of a pipe fails the step.
+    shell: bash
+
+env:
+  HELM_VERSION: v4.3.1 # Helm 4 (ADR-047), as in the organization's workflow
+  ACTIONLINT_IMAGE: docker.io/rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+  KUBECONFORM_IMAGE: ghcr.io/yannh/kubeconform:v0.8.0@sha256:faffaf43f95aa6425306e1ab8d6fcad72acb9049158f38e574c085ea1ec0f64e
+  KUBERNETES_VERSION: 1.35.0 # schema version of the built-in kinds: the minor version of the cluster
+  # Schemas of the Gateway API, Traefik and cert-manager kinds: github.com/datreeio/CRDs-catalog, pinned by commit.
+  CRD_CATALOG_COMMIT: 89c736bdde38b5fecd0f8436ec5f3aa3679a3b86
+  # The Traefik chart the pipeline installs (ci-cd.yml, prerequisite-charts), rendered here with helm/traefik-values.yaml
+  # and the CRD schemas; the step "Same Traefik version as the deploy" fails when the two differ.
+  TRAEFIK_CHART_VERSION: 42.3.1
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Workflow lint (actionlint, includes shellcheck)
+        run: docker run --rm -v "$PWD":/repo -w /repo "$ACTIONLINT_IMAGE" -color
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm # needs the committed package-lock.json
+
+      - name: Install dependencies exactly as locked
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run typecheck
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Helm is version 4
+        run: |
+          helm version --short
+          [[ "$(helm version --short)" == v4.* ]] || { echo "::error::expected Helm 4 ($HELM_VERSION)"; exit 1; }
+
+      - name: Chart lint (default, dev and prod values)
+        run: |
+          helm lint helm --namespace gateway --strict
+          helm lint helm --namespace gateway --strict -f helm/values-dev.yaml
+          helm lint helm --namespace gateway --strict -f helm/values-prod.yaml
+
+      - name: Same Traefik version as the deploy
+        # yq (mikefarah v4) is installed on GitHub's ubuntu-24.04 runners.
+        run: |
+          charts=$(yq '.jobs.pipeline.with["prerequisite-charts"]' .github/workflows/ci-cd.yml)
+          line=$(grep -E '^[[:space:]]*traefik[[:space:]]' <<< "$charts") \
+            || { echo "::error::ci-cd.yml installs no prerequisite chart with the release traefik"; exit 1; }
+          read -r -a f <<< "$line"
+          [[ "${f[4]}" == "$TRAEFIK_CHART_VERSION" ]] \
+            || { echo "::error::ci-cd.yml installs Traefik chart ${f[4]}, this file checks $TRAEFIK_CHART_VERSION: change both"; exit 1; }
+          echo "Traefik chart $TRAEFIK_CHART_VERSION in both files"
+
+      - name: Manifests match the schemas (Kubernetes, Gateway API, Traefik, cert-manager)
+        run: |
+          validate() {
+            docker run --rm -i "$KUBECONFORM_IMAGE" -strict -summary -kubernetes-version "$KUBERNETES_VERSION" \
+              -schema-location default \
+              -schema-location "https://raw.githubusercontent.com/datreeio/CRDs-catalog/$CRD_CATALOG_COMMIT/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" -
+          }
+          check() {
+            echo "::group::$1"
+            shift
+            "$@" | validate
+            echo "::endgroup::"
+          }
+          check "gateway chart, dev values" helm template gateway helm --namespace gateway -f helm/values-dev.yaml
+          check "gateway chart, prod values" helm template gateway helm --namespace gateway -f helm/values-prod.yaml
+          check "Traefik chart $TRAEFIK_CHART_VERSION with helm/traefik-values.yaml" \
+            helm template traefik traefik --repo https://traefik.github.io/charts --version "$TRAEFIK_CHART_VERSION" \
+              --namespace gateway -f helm/traefik-values.yaml
+
+      - name: Chart has a smoke test (helm test hook)
+        # Without a test hook "helm test" passes without testing anything after a deploy.
+        run: |
+          helm template gateway helm --namespace gateway -f helm/values-prod.yaml \
+            | grep -Eq 'helm\.sh/hook"?:[[:space:]]*"?test' \
+            || { echo "::error::the chart has no helm test hook (templates/tests/): the smoke test would check nothing"; exit 1; }
+
+      - name: Drift tests (the chart rendered by Helm against local/)
+        run: npm test
+
+      - name: Keep the test reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-reports
+          path: reports/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  e2e:
+    # The proof against a running stack: Traefik, oauth2-proxy, a stub identity provider and echo backends
+    # in Docker (all images pinned by digest). Separate from "test" so the two run side by side.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies exactly as locked
+        run: npm ci
+
+      - name: Tests against the local stack
+        run: npm run test:e2e
+
+      - name: Remove what a killed run left behind
+        if: always()
+        run: npm run stack:down
+
+      - name: Keep the test reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-reports
+          path: |
+            reports/
+            .run/logs/
+          retention-days: 7
+          if-no-files-found: ignore

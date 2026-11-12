@@ -1,0 +1,102 @@
+# CI/CD of the gateway. The steps live in the organization's shared workflow (RSO-ekipa10/.github,
+# .github/workflows/service-ci-cd.yml, ADR-051); this file only says when it runs and with which settings. The gateway
+# has no code and no image of its own (Helm values and templates), so it calls the shared workflow with
+# build-image: false. Before its own chart, the shared workflow installs the third-party parts the chart needs in the
+# cluster (inputs prerequisite-manifests and prerequisite-charts, in this order): the Gateway API CRDs, cert-manager
+# and Traefik. The checks of the gateway that the shared workflow does not run stay in chart-ci.yml.
+#   pull request   job "pipeline / test": workflow lint, Helm 4, the prerequisites downloaded, checked against their
+#                  sha256 pins and validated, chart lint and schema check (dev and prod values), helm test hook;
+#                  jobs "chart-rules / test" (lint and type check of the tests, strict chart lint, manifests against
+#                  the Kubernetes, Gateway API, Traefik and cert-manager schemas, drift tests) and "chart-rules / e2e"
+#                  (the tests against the local Docker stack)
+#   push to main   the same checks, then the deploy: Gateway API CRDs, cert-manager, Traefik, the Secret gateway-env
+#                  from the organization secret GATEWAY_ENV, the gateway chart, the smoke test (helm test) and the
+#                  rollback of the gateway release when it fails; the job "pipeline" starts only when "chart-rules"
+#                  passed
+#   manual run     redeploy or roll back to the chart of an earlier commit of main (input "sha")
+name: ci-cd
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Redeploy or roll back to the chart of this full commit SHA from main (empty = newest commit)
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # Pull requests: a newer push cancels the older run. Main and manual runs from main share one
+  # group, and a newer run never cancels a running one (a killed "helm upgrade" leaves the
+  # release stuck). A manual run from another branch gets its own group and deploys nothing.
+  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' || github.ref != 'refs/heads/main') && github.ref || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pipeline:
+    # The job id "pipeline" calling the job "test" gives the check name "pipeline / test",
+    # the name the branch ruleset of the services requires.
+    # A push to main deploys only when "chart-rules" passed (the end-to-end tests included); a pull request runs both
+    # jobs and shows both results, and a manual run has no "chart-rules" (it only redeploys a commit already checked
+    # on main).
+    needs: chart-rules
+    if: ${{ !cancelled() && (github.event_name != 'push' || needs.chart-rules.result == 'success') }}
+    permissions:
+      contents: read
+      id-token: write # Azure login with OIDC in the deploy job
+    # TO DO AFTER org-github IS PUSHED: the inputs prerequisite-manifests and prerequisite-charts and the secret
+    # secret-values exist only from the commit of RSO-ekipa10/.github that adds them (build-image, public-host and
+    # host-values from earlier ones). Until that commit is on main there, GitHub refuses this file ("Invalid input")
+    # and no check runs.
+    # Pin this line to a commit SHA when the release tag exists:
+    #   uses: RSO-ekipa10/.github/.github/workflows/service-ci-cd.yml@<40-character SHA> # <tag>
+    uses: tmp-tmppp/.github/.github/workflows/service-ci-cd.yml@main
+    with:
+      service: gateway # the Helm release name and the prefix of the Secret gateway-env
+      # Traefik and this chart live in the namespace gateway (README, "Deploy"); the services stay in prod. The
+      # namespace is created once by hand, like prod.
+      namespace: gateway
+      build-image: false
+      azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+      sha: ${{ inputs.sha }}
+      # The listener, the routes, the certificate and the token issuer (auth.issuer empty = https://<hostname>/realms/chance)
+      # all follow the organization variable PUBLIC_HOST.
+      public-host: ${{ vars.PUBLIC_HOST }}
+      host-values: |
+        hostname={host}
+      # Gateway API v1.6.3, Standard channel (the version Traefik v3.7 supports; README, "Versions"): 10 CRDs and the
+      # admission policy safe-upgrades. The Traefik chart ships no Gateway API CRDs, and the Gateway API release has
+      # only the two install files (standard and experimental), no chart.
+      # The sha256 is of the release file; a new version needs a new pin (README, "Update a prerequisite").
+      prerequisite-manifests: |
+        https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.3/standard-install.yaml sha256:356c2b8e286a964dc20995435659ad1095386329974793af10bbfe3eff977fe5
+      # RELEASE NAMESPACE REPOSITORY CHART VERSION sha256-of-the-chart-archive VALUES-FILE, installed in this order.
+      # cert-manager serves the Issuer and Certificate of this chart; Traefik is the proxy and brings the Traefik CRDs
+      # (Middleware) and the GatewayClass. chart-ci.yml renders the same Traefik version again with the CRD schemas.
+      prerequisite-charts: |
+        cert-manager cert-manager oci://quay.io/jetstack/charts cert-manager v1.21.3 sha256:9ec67938b2981d8b333af61b3fcf53e26b4f6f5deb7ccda3de4ea116bb373a17 helm/cert-manager-values.yaml
+        traefik gateway https://traefik.github.io/charts traefik 42.3.1 sha256:984969e5f6959bfc410e74e07d4062e76cbd7af0b5df1abae60e5e64d6218dcd helm/traefik-values.yaml
+    secrets:
+      # Named secrets only (no "inherit"). No Docker Hub token: nothing is pushed.
+      azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }} # secrets, so the public logs mask them
+      azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # The contact address of the Let's Encrypt account, from the organization secret ACME_EMAIL, so it is in neither
+      # this repository nor the public run logs (the shared workflow masks it and passes it as a file). The key stays in
+      # this line, so a pull request without organization secrets only warns, and a deploy without the secret stops.
+      secret-values: ${{ format('tls.issuer.acme.email={0}', secrets.ACME_EMAIL) }}
+      # KEY=value lines: OAUTH2_PROXY_CLIENT_SECRET and OAUTH2_PROXY_COOKIE_SECRET (.env.example), the Secret gateway-env.
+      app-env: ${{ secrets.GATEWAY_ENV }}
+
+  chart-rules:
+    # The checks of the gateway itself, in chart-ci.yml (its job ids test and e2e give "chart-rules / test" and
+    # "chart-rules / e2e"). A manual run only redeploys a commit that was already checked on main.
+    if: github.event_name != 'workflow_dispatch'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/chart-ci.yml

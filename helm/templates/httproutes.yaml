@@ -1,0 +1,82 @@
+{{- /*
+One HTTPRoute per entry of .Values.routes. Every rule carries one ExtensionRef filter: the Traefik Middleware chain of
+its class (middlewares.yaml). With TLS the routes attach to the https listener and one more route on the http listener
+redirects everything to HTTPS; the ACME challenge route that cert-manager adds is an exact path, so it wins over that
+redirect.
+*/ -}}
+{{- $root := . -}}
+{{- $fullname := include "gateway.fullname" . -}}
+{{- $section := ternary "https" "http" (not (empty (include "gateway.tls" .))) -}}
+{{- $svcNs := include "gateway.servicesNamespace" . -}}
+{{- range $name, $route := .Values.routes }}
+{{- if or (not (hasKey $route "enabled")) $route.enabled }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $fullname }}-{{ $name }}
+  labels:
+    {{- include "gateway.labels" $root | nindent 4 }}
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ $fullname }}
+      sectionName: {{ $section }}
+  hostnames:
+    - {{ $root.Values.hostname | quote }}
+  rules:
+    {{- range $rule := $route.rules }}
+    - matches:
+        {{- range $match := $rule.matches }}
+        - path:
+            type: {{ $match.type | default "PathPrefix" }}
+            value: {{ $match.path | quote }}
+          {{- if $match.method }}
+          method: {{ $match.method }}
+          {{- end }}
+        {{- end }}
+      filters:
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: {{ $fullname }}-{{ $rule.class }}
+      backendRefs:
+        {{- if eq $route.backend "self" }}
+        - name: {{ include "gateway.authname" $root }}
+          port: {{ $root.Values.auth.port }}
+        {{- else }}
+        {{- $be := index $root.Values.backends $route.backend }}
+        - name: {{ $be.service }}
+          {{- if $svcNs }}
+          namespace: {{ $svcNs }}
+          {{- end }}
+          port: {{ $be.port }}
+        {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.tls.enabled }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $fullname }}-https-redirect
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ $fullname }}
+      sectionName: http
+  hostnames:
+    - {{ .Values.hostname | quote }}
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+{{- end }}

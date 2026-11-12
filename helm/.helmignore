@@ -1,0 +1,5 @@
+# Values of the official Traefik chart, installed as its own release: not part of this chart.
+traefik-values.yaml
+.DS_Store
+*.swp
+*.tmp

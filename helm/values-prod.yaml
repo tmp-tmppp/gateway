@@ -1,0 +1,19 @@
+# Prod overrides (the AKS cluster). The pipeline sets the public host with --set-string (plan INF-01: the host is not
+# known yet) and the ACME contact address with --set-file from the organization secret ACME_EMAIL; secrets come from
+# the Secret gateway-env.
+hostname: chance.example
+
+tls:
+  issuer:
+    type: acme
+    acme:
+      server: https://acme-v02.api.letsencrypt.org/directory
+
+auth:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi

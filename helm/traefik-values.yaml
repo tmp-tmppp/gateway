@@ -1,0 +1,143 @@
+# Values for the official Traefik chart (https://traefik.github.io/charts), a separate Helm release named "traefik"
+# in the namespace "gateway". The pipeline installs it after the Gateway API CRDs and cert-manager and before the
+# gateway chart (.github/workflows/ci-cd.yml, input prerequisite-charts; README.md, "Deploy").
+# Chart 42.3.1 (2026-11-06) ships Traefik Proxy v3.7.17 and Traefik CRDs; Traefik v3.7 supports Gateway API v1.6.3
+# (Standard channel), whose CRDs the pipeline applies before (input prerequisite-manifests).
+
+# Image pinned by tag and digest (the digest wins). versionOverride tells the chart which version the digest is.
+image:
+  tag: v3.7.17
+  digest: sha256:f4bb143d1135a579b630ed491e17ec50f6f7c9c6a30585ff3d385471d2a86f5a
+versionOverride: v3.7.17
+
+# One replica; two only for a high-availability demo (ADR-039). The RateLimit counters are per replica.
+deployment:
+  replicas: 1
+
+# Small node (ADR-039): about 100 to 150 MiB for Traefik and oauth2-proxy together (ADR-034).
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+providers:
+  # IngressRoute and Middleware CRDs: the Middlewares are attached to HTTPRoutes as ExtensionRef filters, which needs
+  # this provider. Only the namespace of the gateway chart is watched: without the list the provider reads every
+  # namespace, and an IngressRoute created anywhere else (prod included) would become a public route on the same entry
+  # points with none of the token, role and /v1/internal rules of the Gateway. The flag is what limits the watch: the
+  # chart still renders a ClusterRole, which the Gateway API provider needs for its cluster-wide kinds. The
+  # Gateway's listeners take routes from their own namespace only (allowedRoutes from: Same). No cross-namespace
+  # references.
+  kubernetesCRD:
+    enabled: true
+    namespaces:
+      - gateway
+    allowCrossNamespace: false
+    allowExternalNameServices: false
+  # No Ingress objects in this cluster: the Gateway API is the only way in.
+  kubernetesIngress:
+    enabled: false
+  kubernetesGateway:
+    enabled: true
+    experimentalChannel: false
+    # Serve only the Gateway of the gateway chart (release "gateway" in the namespace "gateway").
+    gateways:
+      - name: gateway
+        namespace: gateway
+
+# The GatewayClass "traefik" comes from this chart; the Gateway itself is rendered by the gateway chart, which
+# owns the listeners, the hostname and the certificate.
+gatewayClass:
+  enabled: true
+gateway:
+  enabled: false
+ingressClass:
+  enabled: false
+
+# No dashboard and no API on a public port.
+api:
+  dashboard: false
+ingressRoute:
+  dashboard:
+    enabled: false
+
+ports:
+  # Container ports of the entry points; the Gateway listeners use these (8000 and 8443), the Service maps 80 and 443.
+  #
+  # Request hardening (found by the local proof, local/ and tests/e2e): by default Traefik v3.7 lets encoded slashes,
+  # backslashes, nulls, semicolons, percent signs, question marks and hashes through in the path, so
+  # "/v1/trading/..%2finternal" is routed to trading with the path as written, and a backend that decodes it first
+  # sees "/v1/trading/../internal". Rejecting them closes that gap (the path is cleaned, so "%2e%2e" and "//" are
+  # handled already). The same for headers whose names alias another name ("X_Auth_User" for "X-Auth-User"): they are
+  # dropped. Docs: doc.traefik.io/traefik/security/request-path/ and .../entrypoints/#aliasheadersstrategy.
+  web:
+    port: 8000
+    exposedPort: 80
+    http:
+      encodedCharacters:
+        allowEncodedSlash: false
+        allowEncodedBackSlash: false
+        allowEncodedNullCharacter: false
+        allowEncodedSemicolon: false
+        allowEncodedPercent: false
+        allowEncodedQuestionMark: false
+        allowEncodedHash: false
+      aliasHeadersStrategy: delete
+  websecure:
+    port: 8443
+    exposedPort: 443
+    http:
+      encodedCharacters:
+        allowEncodedSlash: false
+        allowEncodedBackSlash: false
+        allowEncodedNullCharacter: false
+        allowEncodedSemicolon: false
+        allowEncodedPercent: false
+        allowEncodedQuestionMark: false
+        allowEncodedHash: false
+      aliasHeadersStrategy: delete
+  # Prometheus metrics (REQ-20): their own entry point "metrics" on 9464, the port of every service of the platform
+  # (METRICS_PORT), so one scrape job covers all. Never web or websecure, and not in the Service (expose.default
+  # false: the chart's default, kept explicit), so the public listeners and the load balancer never carry /metrics.
+  # The chart builds the pod annotations prometheus.io/scrape "true", prometheus.io/port "9464" and prometheus.io/path
+  # /metrics itself from ports.metrics.port and metrics.prometheus.entryPoint (templates/_podtemplate.tpl in chart
+  # 42.3.1), so deployment.podAnnotations stays empty: a second set would repeat the keys. The scrapes themselves are
+  # kept out of the access log and out of the entry-point request counters. Chart default of the port: 9100.
+  metrics:
+    port: 9464
+    exposedPort: 9464
+    protocol: TCP
+    expose:
+      default: false
+    observability:
+      accessLogs: false
+      metrics: false
+
+# Prometheus on the entry point "metrics" above (the chart enables it by default; stated here so that a chart upgrade
+# cannot switch it off unnoticed). Series: traefik_* (entry points, services, process).
+metrics:
+  prometheus:
+    entryPoint: metrics
+
+# The public IP of the cluster. "Local" keeps the client address, which the RateLimit uses as its key.
+service:
+  spec:
+    type: LoadBalancer
+    externalTrafficPolicy: Local
+
+# Access log as JSON for the logging stack (ADR-035). Headers are dropped by default (no Authorization header in the
+# log); query parameters are dropped as well.
+accessLog:
+  enabled: true
+  format: json
+  fields:
+    headers:
+      defaultMode: drop
+    queryParameters:
+      defaultMode: drop
+
+log:
+  format: json
+  level: INFO

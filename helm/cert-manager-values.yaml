@@ -1,0 +1,38 @@
+# Values for the official cert-manager chart (oci://quay.io/jetstack/charts/cert-manager), a separate Helm release
+# named "cert-manager" in its own namespace "cert-manager". The pipeline installs it after the Gateway API CRDs and
+# before Traefik and the gateway chart (.github/workflows/ci-cd.yml, input prerequisite-charts; README.md, "Deploy").
+# Chart v1.21.3 runs cert-manager v1.21.3. Everything not set here is the chart's default.
+
+# The cert-manager CRDs (Certificate, Issuer, ...) as part of the release: rendered as templates, so a chart upgrade
+# upgrades them too (Helm never upgrades the CRDs of a crds/ folder). keep: uninstalling the release leaves the CRDs,
+# and with them every Certificate and the account key, in place (the chart's default, stated so an upgrade cannot
+# change it unnoticed).
+crds:
+  enabled: true
+  keep: true
+
+# The HTTP-01 solver through the Gateway: the Issuer of the gateway chart (templates/certificate.yaml) lets
+# cert-manager add a temporary HTTPRoute to the Gateway's http listener. Needs the Gateway API CRDs before
+# cert-manager starts.
+config:
+  gatewayAPI:
+    enabled: true
+
+# The five images of cert-manager v1.21.3 pinned by digest: with a digest and no tag the chart renders
+# quay.io/jetstack/<image>@sha256:... (checked with helm template). Digests of the multi-arch index of the tag v1.21.3
+# on quay.io, read 2026-11-12 (README.md, "Update a prerequisite", has the lookup). A chart upgrade needs all five new
+# digests.
+image:
+  digest: sha256:9f4f96a33c7774cef24466fcd85031997531a03a8d117f151126baa8d1290dcc # cert-manager-controller
+webhook:
+  image:
+    digest: sha256:055ac8e9de6a0ba6763794838fe38944acc650f68ebe1b01dd8be079e580f458 # cert-manager-webhook
+cainjector:
+  image:
+    digest: sha256:083d0e906f8eb44e255fe4ff817ae54e49f9ed82e22f1011bb4e9e4f4b8a641f # cert-manager-cainjector
+acmesolver:
+  image:
+    digest: sha256:c8c1225bb2fe8ab37a330b77f0d8c2ee6a41210fcb54fc07ca606ab9a022b8b7 # cert-manager-acmesolver
+startupapicheck:
+  image:
+    digest: sha256:1c519d4afca1413d1e4ccd78bdc756184418ab55a34569a3b3de39d32f9974e1 # cert-manager-startupapicheck
